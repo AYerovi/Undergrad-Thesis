@@ -1,0 +1,538 @@
+---
+title: "On the Association Between Precpitation and Economic Growth - Supplementary Paper"
+author: "Adrian Yerovi"
+date: "5/18/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Database construction
+
+Here we show how the dataset used in our paper was constructed.
+
+## 1.1 GDP and HDI data
+
+The disaggregated macroeconomic data comes from Kummu et al. (2018). As there is global data for the period 1990-2015 (the least number of years with respect to all the other sources in the construction of our dataset), the period of analysis for our paper is constrained to this 26-year time span.
+
+We start by loading the data using the R package "netcdf4", considering that the data from Kummu and his colleagues comes in the .nc format.
+
+``` {#numCode .R .numberLines}
+    library(ncdf4)
+    library(tidyverse)
+    kummu <- nc_open("GDP_PPP_1990_2015_5arcmin_v2.nc")
+```
+
+Running `print(kummu)` (or just `kummu`) we see the following:
+
+        File GDP_PPP_1990_2015_5arcmin_v2.nc (NC_FORMAT_NETCDF4):
+
+             1 variables (excluding dimension variables):
+                float GDP_PPP[longitude,latitude,time]   (Chunking: [618,309,3])  
+                (Compression: shuffle,level 9)
+                    long_name: Gross Domestic Production (GDP) (PPP)
+                    units: constant 2011 international US dollar
+                    missing_value: -9
+
+             3 dimensions:
+                longitude  Size:4320 
+                    standard_name: longitude
+                    long_name: longitude
+                    units: degrees_east
+                    axis: X
+                latitude  Size:2160 
+                    standard_name: latitude
+                    long_name: latitude
+                    units: degrees_north
+                    axis: Y
+                time  Size:26 
+                    standard_name: Time
+                    long_name: Time
+                    units: year
+                    calendar: standard
+
+            7 global attributes:
+                creation_date: 02-Aug-2017 14:30:34
+                resolution: 5 arc-min
+                projection: WGS84
+                extent: lat: 90S - 90N; lon: 180E - 180W
+                product: Total Gross Domestic Production (GDP) (PPP) for years 1990-2015
+                citation: When using the data, please refer to following publication: TBA
+                more information: For more information, see: TBA
+
+The GDP data must first be extracted as an array.
+
+``` {.R .numberLines}
+    gdp_array <- ncvar_get(kummu,"GDP_PPP")
+```
+
+This last object has the dimensions 4320 by 2160 by 26, and thus we have to extract each one of 26 separate layers containing the yearly disaggregated GDP (in PPP). For this we wrote a loop which extracts each layer, converts it into a data frame, and writes out the output in a text file to be used later. We can then bind all 26 resulting data frames into a single one. Since the GDP data is in a finer level of detail than the weather data, we must first center each observation to its corresponding 0.5 $\times$ 0.5 degree grid cell, which can be done by defining the following function[^1]
+
+[^1]: <https://gis.stackexchange.com/questions/48416/aggregating-points-to-grid-using-r>
+
+``` {.R .numberLines}
+    ji <- function(xy, origin=c(0,0), cellsize=c(0.5,0.5)) {
+      t(apply(xy, 1, function(z) cellsize/2+origin+cellsize*(floor((z - origin)/cellsize))))
+    }
+```
+
+With this, achieving the desired grid cell size can be done by first centering and truncating the observation using the `ji` function, and then summing all the observations within each grid cell. The implementation is as follows.
+
+``` {.R .numberLines}
+    # First create a dataframe with the longitude-latitude pairs in two separate cols.
+    lon <- ncvar_get(kummu,"longitude")
+    lat <- ncvar_get(kummu,"latitude")
+    time <- ncvar_get(kummu,"time") %>% as.vector()
+    lonlat <- as.matrix(expand.grid(lon,lat))
+
+    # The the loop
+    for(i in 1:26){
+
+      # GDP data for year i: 
+      gdp_slice <- gdp_array[,,i]
+      gdp_vec <- as.vector(gdp_slice)
+      df <- data.frame(cbind(lonlat, gdp_vec))
+      
+      # Create a grid at the 5-deg level
+      JI <- ji(cbind(df$Var1, df$Var2)) # Var1 and Var2 are the default names
+      df$x <- JI[, 1]  # x for longitude 
+      df$y <- JI[, 2]  # y for latitude
+      
+      # Aggregate (sum) by lon-lat pairs
+      df$Cell <- paste(df$x, df$y)  # Pair identifier (a string)
+      sum_d <- by(df, df$Cell, 
+                  function(d) c(d$x[1], d$y[1], d$Cell[1], sum(d$gdp_vec, na.rm = T))) 
+      sum_d.m <- t(matrix(unlist(sum_d), nrow=4))
+      colnames(sum_d.m) <- c("x", "y", "Cell", "GDP")
+      write.csv(as.data.frame(sum_d.m), 
+                    paste("GDP_PPP_", as.character(time[i]), ".csv", sep = "" ))
+      rm(gdp_slice, gdp_vec, df, JI, sum_d, sum_d.m)
+      
+    }
+```
+
+The resulting output are 26 csv files named `GDP_PPP_XXXX.csv` where `XXXX` denotes the year.
+
+We do the same for the Human Development Index variable from Kummu et al., which comes in a separate netCDF file.
+
+``` {.R .numberLines}
+kummu <- nc_open("HDI_1990_2015_v2.nc")
+hdi_array <- ncvar_get(kummu,"HDI")
+
+for(i in 1:26){
+
+  hdi_slice <- hdi_array[,,i]
+  hdi_vec <- as.vector(hdi_slice)
+  df <- data.frame(cbind(lonlat, hdi_vec))
+  
+  JI <- ji(cbind(df$Var1, df$Var2))
+  df$x <- JI[, 1]
+  df$y <- JI[, 2]
+  
+  df$Cell <- paste(df$x, df$y)
+  sum_d <- by(df, df$Cell, 
+              function(d) c(d$x[1], d$y[1], d$Cell[1], mean(d$hdi_vec, na.rm = T)))
+  sum_d.m <- t(matrix(unlist(sum_d), nrow=4)) %>% as.data.frame()
+  colnames(sum_d.m) <- c("x", "y", "Cell", "HDI")
+  sum_d.m$HDI <- ifelse(sum_d.m$HDI == "NaN", NA, sum_d.m$HDI)
+              # NaN values correspond to places with no population (0/0)
+  sum_d.m$HDI <- sum_d.m$HDI %>% as.numeric()
+  write.csv(as.data.frame(sum_d.m), 
+              paste("HDI_", as.character(time[i]), ".csv", sep = "" ))
+  rm(hdi_slice, hdi_vec, df, JI, sum_d, sum_d.m)
+  
+}
+```
+
+Then, so as to have a single country identity for each half-degree cell, we take advantage of the R package `rworldmap` and its `gridCountriesDegreesHalf` grid, which specifies the grid cell countries in terms of its UN numeric code and is---conveniently---at the same resolution we need. We merge it with the data from Kummu et al. with a loop using the .csv files created above.
+
+``` {.R .numberLines}
+library(rworldmap)
+data(gridCountriesDegreesHalf)
+grid <- as.data.frame(gridCountriesDegreesHalf)
+colnames(grid) <- c("UN_country", "x", "y")
+write.csv(grid, "grid.csv")
+GDP_PPP_1990_2015 <- grid
+temp <- read.csv("GDP_PPP_1990.csv", row.names = 1)
+temp <- subset(temp, select = -Cell)
+colnames(temp)[3] <-"GDP_1990"
+GDP_PPP_1990_2015 <- left_join(GDP_PPP_1990_2015, temp)
+
+for(i in 1991:2015){
+  temp <- read.csv(paste("GDP_PPP_", as.character(i), ".csv", sep=""), row.names = 1)
+  temp <- subset(temp, select = -Cell)
+  colnames(temp)[3] <- paste("GDP_", as.character(i), sep="")
+  GDP_PPP_1990_2015 <- left_join(GDP_PPP_1990_2015, temp)
+  rm(temp)
+}
+
+write.csv(GDP_PPP_1990_2015, "GDP_PPP_1990_2015.csv")
+```
+
+And we do the same for the HDI.
+
+``` {.R .numberLines}
+temp <- read.csv("HDI_1990.csv", row.names = 1)
+temp <- subset(temp, select = -Cell)
+colnames(temp)[3] <- "HDI_1990"
+HDI_1990_2015 <- grid
+HDI_1990_2015 <- left_join(HDI_1990_2015, temp)
+
+for(i in 1991:2015){
+  temp <- read.csv(paste("HDI_", as.character(i), ".csv", sep=""), row.names = 1)
+  temp <- subset(temp, select = -Cell)
+  colnames(temp)[3] <- paste("HDI_", as.character(i), sep="")
+  HDI_1990_2015 <- left_join(HDI_1990_2015, temp)
+  rm(temp)
+}
+
+write.csv(HDI_1990_2015, "HDI_1990_2015.csv")
+```
+
+The resulting tables, `GDP_PPP_1990_2015` and `HDI_1990_2015`, are in a "wide" format which we will later convert to "long" for the data analysis. This is done for efficiency, given that the size of the text file is dramatically reduced when the data is stored in the wide format.
+
+To assess the data visually, we plot the data in 5-year intervals from 1990 to 2015, which are comparable to Figure 3 from Kummu et al. Having the data in a data frame format, we use the utilities of the `ggplot2` package.
+
+```{r, message=FALSE, warning=FALSE}
+# Libraries required
+library(ggplot2)
+library(raster)
+library(maptools)
+library(ggmap)
+library(viridis) # For the gradients
+```
+```{r echo=FALSE, message=FALSE, warning = FALSE}
+GDP_PPP_1990_2015 <- read.csv("GDP_PPP_1990_2015.csv", row.names = 1)
+```
+
+```{r,  warning = FALSE, message = FALSE, attr.source='.numberLines'}
+# Map borders
+map <- borders("world", colour = "black", size = 0.05)
+years <- c(1990, 1995, 2000, 2005, 2010, 2015)
+
+# We use a for loop to create the plots
+for(i in 1:length(years)){
+  
+  # Select variable to plot
+  yy <- years[i]
+  variable <- paste("GDP_", as.character(yy), sep = "")
+  col <- which(colnames(GDP_PPP_1990_2015) == variable)
+  GDP_PPP_1990_2015[, col] <- ifelse(GDP_PPP_1990_2015[, col] == 0, NA,
+                                     GDP_PPP_1990_2015[, col]) 
+          # 0's are plotted as NA's to get a better gradient distinction
+  
+  # Plotting
+  p <- ggplot(GDP_PPP_1990_2015, aes(x = X, y = Y)) +
+    geom_tile(aes(fill = log(GDP_PPP_1990_2015[, col]+1))) +
+    ggtitle(paste(as.character(i), ". log GDP ", as.character(yy), sep = "")) +
+    labs(fill = element_blank()) + xlab("Longitude") + ylab("Latitude") + # Labels
+    scale_fill_gradientn(colours=rev(turbo(6)), na.value = "grey100") +
+    theme(text=element_text(family="serif"), # Font
+          axis.ticks=element_blank(), 
+          axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          panel.background=element_blank(),
+          panel.grid.major=element_blank(),
+          panel.grid.minor=element_blank(),
+          plot.background=element_blank()) + 
+    coord_fixed() +
+    map
+    
+    print(p)
+    rm(p)
+
+}
+```
+
+The same is plotted for the HDI. 
+
+```{r echo=FALSE, message=FALSE, warning = FALSE}
+HDI_1990_2015 <- read.csv("HDI_1990_2015.csv", row.names = 1)
+```
+
+
+```{r,  warning = FALSE, message = FALSE, attr.source='.numberLines'}
+# Map borders
+# We use a for loop to create the plots
+for(i in 1:length(years)){
+  
+  # Select variable to plot
+  yy <- years[i]
+  variable <- paste("HDI_", as.character(yy), sep = "")
+  col <- which(colnames(HDI_1990_2015) == variable)
+  HDI_1990_2015[, col] <- ifelse(HDI_1990_2015[, col] == 0, NA,
+                                     HDI_1990_2015[, col]) 
+          # 0's are plotted as NA's to get a better gradient distinction
+  
+  # Plotting
+  p <- ggplot(HDI_1990_2015, aes(x = X, y = Y)) +
+    geom_tile(aes(fill = log(HDI_1990_2015[, col]+1))) +
+    ggtitle(paste(as.character(i), ". HDI ", as.character(yy), sep = "")) +
+    labs(fill = element_blank()) + xlab("Longitude") + ylab("Latitude") + # Labels
+    scale_fill_gradientn(colours=rev(turbo(6)), na.value = "grey100") +
+    theme(text=element_text(family="serif"), # Font
+          axis.ticks=element_blank(), 
+          axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          panel.background=element_blank(),
+          panel.grid.major=element_blank(),
+          panel.grid.minor=element_blank(),
+          plot.background=element_blank()) + 
+    coord_fixed() +
+    map
+    
+    print(p)
+    rm(p)
+
+}
+```
+
+Then we obtain the yearly variations in the GDP and HDI for each grid cell. That is, the first differences $\Delta log(GDP_{s,t}) = log(GDP_{s,t})-log(GDP_{s, t-1})$ and $\Delta HDI_{s,t} = HDI_{s,t} - HDI_{s, t-1}$. For convenience we construct two other tables parting from `GDP_PPP_1990_2015` and `HDI_1990_2015`. 
+
+``` {.R .numberLines}
+# The first GDP differences
+D_GDP_PPP_1990_2015 <- GDP_PPP_1990_2015[, c(1:3)] # Cols 1-3 same
+D_GDP_PPP_1990_2015[, c(4:29)] <- 0 # Initialize 1990-2015 cols.
+cols_D <- colnames(GDP_PPP_1990_2015)[4:29]
+cols_D <- paste0("D_", cols_D, sep= "")
+colnames(D_GDP_PPP_1990_2015)[4:29] <- cols_D
+
+for(j in 5:dim(D_GDP_PPP_1990_2015)[2]){
+  D_GDP_PPP_1990_2015[, j] = 
+    ifelse(is.na(GDP_PPP_1990_2015[, j]) | is.na(GDP_PPP_1990_2015[, j-1]), 
+           NA, GDP_PPP_1990_2015[, j] - GDP_PPP_1990_2015[, j-1])
+}
+
+# The first HDI differences
+D_HDI_1990_2015 <- HDI_1990_2015[, c(1:3)] # Cols 1-3 same
+D_HDI_1990_2015[, c(4:29)] <- 0  # Initialize 1990-2015 cols.
+cols_D <- colnames(HDI_1990_2015)[4:29] # Colnames
+cols_D <- paste0("D_", cols_D, sep= "") # Add 'D_' to colnames
+colnames(D_HDI_1990_2015)[4:29] <- cols_D
+
+for(j in 5:dim(D_HDI_1990_2015)[2]){
+  D_HDI_1990_2015[, j] = 
+    ifelse(is.na(HDI_1990_2015[, j]) | is.na(HDI_1990_2015[, j-1]), 
+           NA, HDI_1990_2015[, j] - HDI_1990_2015[, j-1])
+}
+```
+
+## 1.2 Weather data
+
+The terrestrial air temperature and precipitation data from Wilmott and Mutsuura is available  at <http://climate.geog.udel.edu/~climate/html_pages/download.html#wb2>. This data comes in various text files, one for each variable (temperature and precipitation) and for year between 1900 and 2015, totaling 236 items. The naming convention of the files is `air_temp.XXXX` and `precip.XXX`, where `XXXX` is the year in four digits. Each text file has 15 columns with the longitude, the latitude, the monthly observations of the corresponding variables (12 columns), and the yearly average respectively. Since the text files do not contain headers, \emph{R} reads the column names with its naming convention `V1`, `V2`, $\ldots$, `V15`.
+
+Using this, we implement a loop to read each file and merge the data into two separate tables, which we will name `temperature` and `precipitation`. In the precipitation table we will also compute the entropy, so as to later calculate the seasonality index. Also, our tables will contain the data for the 1900-2015 period, because the complete historical data is needed to calculate the long run means as described in the paper. We put all of the weather data files into a single folder, whose path is a string named `dir` in what follows (i.e., to replicate the computations one has to do `dir <- "<path-to-data>"`). 
+
+The basic idea of the code is to create a starting data frame containing the longitude-latitude pair identifiers, using the `gridCountriesDegreesHalf` dataset as before, and then merge the data iteratively after reading it and doing the needed computations. The column names of the resulting data frames will be: `MeanT_XXXX` for the average temperature on year `XXXX`, `MeanP_XXXX` for the average precipitation rate, and `D_XXXX` for the observed rainfall entropy.
+
+``` {.R .numberLines}
+grid <- as.data.frame(gridCountriesDegreesHalf)
+colnames(grid)[2:3] <- c("x", "y") 
+
+temperature <- grid
+precipitation <- grid
+for(i in 1900:2015){
+  
+  dd_t <- paste(dir, "air_temp.", as.character(i), sep = "")
+  dd_p <- paste(dir, "precip.", as.character(i), sep = "")
+
+  # Temperature
+  t <- read.table(paste(dd_t), quote="\"", comment.char="") # read data 
+  colnames(t)[1:2] <- c("x", "y")
+  t <- left_join(grid, t)
+  t <- t[,c(1:3, 16)] # Only keep the average yearly Temp.
+  colnames(t)[4] <- paste("MeanT", "_", as.character(i), sep="") 
+                                # Colname: MeanT_<year>
+  
+  # Precipitation
+  p <- read.table(paste(dd_p), quote="\"", comment.char="") # read data
+  colnames(p)[1:2] <- c("x", "y")
+  p <- left_join(grid, p)
+  # Compute the entropy w/ the precip. data
+  p$D = 0           # Initialize entropy vector
+  colnames(p)[16] <- "MeanP" # Change the name
+  for(j in 4:15){   # Compute entropy
+    p$D = p$D + (p[, j]/p$MeanP)*log2(12*p[, j]/p$MeanP+1)/log2(12+1) 
+  }
+  p <- p[,c(1:3, 16:17)] # Only keep the needed
+  
+  colnames(p)[4] <-  paste("MeanP", "_", as.character(i), sep="") 
+                                # Colname: MeanP_<year>
+  colnames(p)[5] <-  paste("D", "_", as.character(i), sep="")  
+                                # Colname: D_<year>
+  
+  # Join into a single dataframe
+  temperature <- left_join(temperature, t)
+  precipitation <- left_join(precipitation, p)
+  rm(p,t)
+  
+} # end of loop
+
+write.csv(temperature, "temperature.csv")
+write.csv(precipitation, "precipitation.csv")
+```
+
+Then using the `temperature` and `precipitation` tables we can compute the long run mean precipitation and temperature, the standard deviations, and the long run rainfall entropy for each grid cell. Having the data in a long format, the operations have to be carried out in a ``horizontal'' manner. 
+
+``` {.R .numberLines}
+# Temperature LR
+temperature$MeanTLR = 0 # initialize col.
+temperature$SdTLR = 0
+for(i in 1:dim(temperature)[1]){
+  
+  # LR temperature mean and SD
+  k <- colnames(temperature) %in% 
+               grep("^MeanT_", colnames(temperature), value = T) %>%
+               which()
+            # to select the MeanP_XXXX cols.
+  p <- temperature[i, c(k)] %>% as.numeric()
+  if(sum(is.na(p)) == length(p)){  
+    temperature$MeanTLR[i] = NA    # otherwise the mean of NAs is 0
+  } else {
+    temperature$MeanTLR[i] <- p %>% mean(na.rm = T) # LR mean temp
+  }
+  temperature$SdTLR[i] <- p %>% sd(na.rm = T)  # LR sd temp
+  
+  rm(k, p)
+  
+} # end of loop
+
+# Precipitation LR
+precipitation$MeanPLR = 0
+precipitation$SdPLR = 0
+precipitation$DLR = 0
+for(i in 1:dim(precipitation)[1]){
+  
+  # LR precipitation mean and SD
+  k <- colnames(precipitation) %in% 
+               grep("^MeanP_", colnames(precipitation), value = T)) %>%
+               which()
+  p <- precipitation[i, c(k)] %>% as.numeric()
+  if(sum(is.na(p)) == length(p)){
+    precipitation$MeanPLR[i] = NA
+  } else {
+    precipitation$MeanPLR[i] <- p %>% mean(na.rm = T)
+  }
+  precipitation$SdPLR[i] <- p %>% sd(na.rm = T) 
+  
+  # LR entropy
+  k <- colnames(precipitation) %in% 
+               grep("^D_", colnames(precipitation), value = T) %>%
+               which()
+  p <- precipitation[i, c(k)] %>% as.numeric()
+  if(sum(is.na(p)) == length(p)){
+    precipitation$DLR[i] = NA
+  } else {
+    precipitation$DLR[i] <- p %>% mean(na.rm = T)
+  }
+
+  rm(k, p)
+  
+} # end of loop
+```
+
+Now we can subset `precipitation` and `temperature` to have only the data we will use for estimation in a single table; namely, the data for the 1990-2015 period. 
+
+``` {.R .numberLines}
+# Subsetting the data
+
+yy <- c(1990:2015) %>% as.character()
+
+# Precip.
+k <- colnames(precipitation) %in% 
+          grep(paste(yy, collapse="|"),  # regular expression
+               colnames(precipitation), value=TRUE) %>% 
+          which()
+p <- precipitation[, c(1:3, k, 236:238)] 
+                  # keep country, lon, lat, LR means, LR sd
+                  
+# Temp.
+k <- colnames(temperature) %in% 
+  grep(paste(yy, collapse="|"), colnames(temperature), value=TRUE) %>% 
+  which()
+t <- temperature[, c(1:3, k, 120, 121)]
+                  # keep country, lon, lat, LR mean, LR sd
+                  
+# Join
+weather_data <- inner_join(p, t)
+write.csv(weather_data, "weather_data.csv")
+
+rm(t, p, yy, yy_p, yy_t, k, dir_p, dir_t) # no longer needed
+```
+
+
+```{r echo=FALSE, message=FALSE, warning = FALSE}
+# weather_data <- read.csv("weather_data", row.names = 1)
+```
+
+```{r,  warning = FALSE, message = FALSE, attr.source='.numberLines'}
+# Map borders ...
+```
+
+## 1.3 Elevation
+
+Elevation data is from the GMTED 2010 project (Global Multi-resolution Terrain Elevation Data) by the USGS. It also comes in the .nc format, which can be easily read in \emph{R} with the `ncdf4` library. We see the GMTED data has the following properties.
+```{r echo=FALSE, message=FALSE, warning = FALSE}
+library(ncdf4)
+```
+```{r,  warning = FALSE, message = FALSE, attr.source='.numberLines'}
+ncin <- nc_open("GMTED2010_15n120_0500deg.nc")
+print(ncin)
+```
+The warnings displayed are due to the variables stored in the short format being transformed to floats. The above console also displays the link to the data and relevant citation. 
+
+The GMTED data contains elevation numbers for the entire globe grid map (that is, it includes oceans, seas, and non-terrestrial surfaces) and it has no country identification. So, we use the longitude and latitude center of each grid cell to join the elevation data to our reference `grid` object (formally, a Spatial Grid Dataframe) from the `rworldmap` library, to obtain a table containing only the relevant observations. Namely, we to extract the `elevation[nlon,nlat]` variable which is stored as a float, with the longitude-latitude variables, to later merge it with the rest of the data. Hence, we are able to use the same functions as before with the GDP data, and store the elevation data in a table. 
+
+```{.R .numberLines}
+lon <- ncvar_get(ncin,"nlon")
+lon_array <- ncvar_get(ncin,"longitude")
+lat_array <- ncvar_get(ncin,"latitude")
+lon <- as.vector(lon_array)
+lat <- as.vector(lat_array)
+elevation_array <- ncvar_get(ncin,"elevation")
+colnames(elevation_array) <- lat
+rownames(elevation_array) <- lon
+elevation_array <- as_tibble(elevation_array)
+elevation_array$x = lon
+elevation <- gather(elevation_array, "y", "elevation", -x)
+elevation$x <- as.numeric(elevation$x) # x may be stored as a string
+elevation$y <- as.numeric(elevation$y) # y may be stored as a string
+
+# Using the same reference grid of the 'gridCountriesDegreesHalf' dataframe
+elevation <- left_join(grid, elevation)
+
+write.csv(elevation, "elevation.csv") # Save and export
+```
+
+
+```{r echo=FALSE, message=FALSE, warning = FALSE}
+rm(ncin)
+elevation <- read.csv("elevation.csv", row.names = 1)
+```
+
+We can see the elevation visually.
+
+```{r,  warning = FALSE, message = FALSE, attr.source='.numberLines'}
+p <- ggplot(elevation, aes(x = x, y = y)) +
+    geom_tile(aes(fill = elevation)) +
+    ggtitle("Plot: Elevation data") +
+    labs(fill = "Meters") + xlab("Longitude") + ylab("Latitude") + # Labels
+    scale_fill_gradientn(colours=rev(rocket(6)), na.value = "grey100") +
+    theme(text=element_text(family="serif"), # Font
+          axis.ticks=element_blank(), 
+          axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          panel.background=element_blank(),
+          panel.grid.major=element_blank(),
+          panel.grid.minor=element_blank(),
+          plot.background=element_blank()) + 
+    coord_fixed() +
+    map
+
+print(p)
+```
+
+
+
